@@ -1,6 +1,7 @@
 # 安裝必要套件 (若尚未安裝，請先在終端執行)
 # pip install yt-dlp openai-whisper openai pydub psutil
 
+from string import punctuation
 import yt_dlp
 import whisper
 import openai
@@ -137,6 +138,70 @@ def transcribe_api(audio_file_path, client=None):
         print(f"API 轉錄時發生錯誤: {e}")
         return None
 
+# === GPT 標點符號處理 ===
+def add_punctuation_with_gpt(text_chunk, client):
+    """使用 GPT 為文字片段添加標點符號"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "你是一個專業的文字編輯助手。請為以下沒有標點符號的文字添加適當的標點符號，包括句號、逗號、問號、驚嘆號等。保持原文的語意和結構，只添加標點符號。"
+                },
+                {
+                    "role": "user", 
+                    "content": f"請為以下文字添加標點符號：\n\n{text_chunk}"
+                }
+            ],
+            max_tokens=2000,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"GPT 標點符號處理時發生錯誤: {e}")
+        return text_chunk  # 如果失敗，返回原文
+
+# === 批量標點符號處理 ===
+def process_text_with_punctuation(text, client, chunk_size=100):
+    """將文字分割成片段，批量處理標點符號"""
+    print(f"\n📝 開始標點符號處理...")
+    print(f"原始文字長度: {len(text)} 字元")
+    
+    # 按空格分割文字
+    words = text.split(" ")
+    if len(text) > 100 and len(words) < 5: # 文字未被分段
+        chunk_size = 2000
+    
+    print(f"分割成 {len(words)} 個句子")
+    
+    # 計算需要處理的片段數量
+    total_chunks = (len(words) + chunk_size - 1) // chunk_size
+    print(f"將分成 {total_chunks} 個片段處理，每片段 {chunk_size} 個句子")
+    
+    processed_chunks = []
+    
+    for i in range(0, len(words), chunk_size):
+        chunk_num = i // chunk_size + 1
+        chunk_words = words[i:i + chunk_size]
+        chunk_text = " ".join(chunk_words)
+        
+        print(f"處理片段 {chunk_num}/{total_chunks} ({len(chunk_words)} 個句子)...")
+        
+        # 使用 GPT 添加標點符號
+        punctuated_chunk = add_punctuation_with_gpt(chunk_text, client)
+        processed_chunks.append(punctuated_chunk)
+        
+        # 添加小延遲避免 API 限制
+        time.sleep(0.5)
+    
+    # 合併所有處理過的片段
+    final_text = " ".join(processed_chunks)
+    print(f"✅ 標點符號處理完成！")
+    print(f"處理後文字長度: {len(final_text)} 字元")
+    
+    return final_text
+
 # === 智能模型選擇 ===
 def smart_model_selection(audio_path):
     """智能選擇最佳模型"""
@@ -151,7 +216,7 @@ def smart_model_selection(audio_path):
         duration_minutes = 0
     
     # 建議的模型順序（從大到小）
-    model_order = ["large", "medium", "small", "base", "tiny"]
+    model_order = ["large", "medium"] # "small", "base", "tiny"
     recommended = check_system_resources()
     
     print(f"系統建議模型: {recommended}")
@@ -335,7 +400,7 @@ if __name__ == "__main__":
     print("\n請選擇轉錄方式:")
     print("1. 智能模式 (優先本地，失敗時使用API)")
     print("2. 本地模式 (僅使用本地模型)")
-    print("3. API模式 (僅使用OpenAI API，處理價格：每分鐘0.006美元)")
+    print(f"3. API模式 (僅使用OpenAI API，預估處理價格：{round(0.2*duration_minutes, 2)}元)")
     
     mode = input("請選擇 (1-3): ").strip()
     
@@ -387,7 +452,7 @@ if __name__ == "__main__":
     
     elif mode == "2":  # 本地模式
         print("\n💻 本地模式")
-        model_size = input("請選擇模型大小 (tiny/base/small/medium/large): ").strip() or "base"
+        model_size = input("請選擇模型大小 (large/medium/small/base/tiny), 越大品質越好: ").strip() or "base"
         transcript = transcribe_local(audio_file, model_size)
         if transcript:
             used_method = f"本地模型 ({model_size})"
@@ -411,13 +476,46 @@ if __name__ == "__main__":
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         output_filename = os.path.join(output_path, f"{video_title}.txt")
-        with open(output_filename, "w", encoding="utf-8") as f:
-            traditional_text = zhconv.convert(transcript["text"], 'zh-hant')
-            f.write(traditional_text)
+        traditional_text = zhconv.convert(transcript["text"], 'zh-hant')
+        # 詢問是否要添加標點符號
+        print(f"\n📝 轉錄完成！原始文字長度: {len(traditional_text)} 字元")
+        print("\n是否要使用 GPT 為文字添加標點符號？")
+        print("1. 是，添加標點符號 (需要 OpenAI API Key)")
+        print("2. 否，直接儲存原始文字")
         
-        print(f"\n✅ 轉錄完成！")
-        print(f"使用方法: {used_method}")
-        print(f"輸出檔案: {output_filename}")
-        print(f"逐字稿長度: {len(transcript['text'])} 字元")
+        punctuation_choice = input("請選擇 (1-2): ").strip()
+        
+        if punctuation_choice == "1":
+            # 需要 API Key 進行標點符號處理
+            api_key = get_api_key()
+            if api_key:
+                client = openai.OpenAI(api_key=api_key)
+                punctuated_text = process_text_with_punctuation(traditional_text, client)
+                
+                # 儲存帶標點符號的版本
+                with open(output_filename, "w", encoding="utf-8") as f:
+                    f.write(punctuated_text)
+                
+                print(f"\n✅ 標點符號處理完成！")
+                print(f"使用方法: {used_method} + GPT標點符號處理")
+                print(f"輸出檔案: {output_filename}")
+                print(f"處理後文字長度: {len(punctuated_text)} 字元")
+            else:
+                print("❌ 無法取得 API Key，儲存原始文字")
+                with open(output_filename, "w", encoding="utf-8") as f:
+                    f.write(traditional_text)
+                print(f"✅ 轉錄完成！")
+                print(f"使用方法: {used_method}")
+                print(f"輸出檔案: {output_filename}")
+                print(f"逐字稿長度: {len(traditional_text)} 字元")
+        else:
+            # 直接儲存原始文字
+            with open(output_filename, "w", encoding="utf-8") as f:
+                f.write(traditional_text)
+            
+            print(f"\n✅ 轉錄完成！")
+            print(f"使用方法: {used_method}")
+            print(f"輸出檔案: {output_filename}")
+            print(f"逐字稿長度: {len(traditional_text)} 字元")
     else:
         print("\n❌ 轉錄失敗")
