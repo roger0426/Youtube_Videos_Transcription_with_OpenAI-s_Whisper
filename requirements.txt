@@ -1,0 +1,8 @@
+yt-dlp
+openai>=1.0.0
+openai-whisper
+pydub
+psutil
+opencc
+zhconv
+python-dotenv
