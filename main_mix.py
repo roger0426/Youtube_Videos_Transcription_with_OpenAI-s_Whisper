@@ -37,20 +37,29 @@ def check_system_resources():
         
         # 檢查 GPU 記憶體 (如果可用)
         gpu_memory = 0
+        gpu_type = "none"
         try:
             import torch
-            if torch.cuda.is_available():
+            if torch.backends.mps.is_available():
+                # Mac GPU (M1/M2/M3)
+                gpu_type = "mps"
+                # Mac GPU 記憶體通常與系統記憶體共享，估算可用記憶體
+                gpu_memory = available_memory * 0.5  # 假設一半可用給 GPU
+            elif torch.cuda.is_available():
+                # NVIDIA GPU
+                gpu_type = "cuda"
                 gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         except ImportError:
             pass
         
         print(f"系統記憶體: {available_memory:.1f} GB 可用")
         if gpu_memory > 0:
+            print(f"GPU 類型: {gpu_type.upper()}")
             print(f"GPU 記憶體: {gpu_memory:.1f} GB")
         
         # 根據資源建議模型
         if gpu_memory >= 8:
-            return "large"
+            return "large-v3"
         elif gpu_memory >= 4 or available_memory >= 8:
             return "medium"
         elif available_memory >= 4:
@@ -99,7 +108,8 @@ def get_api_key():
         api_key = getpass.getpass("API Key: ").strip()
         
         if api_key and len(api_key) > 20:  # 基本驗證
-            save_choice = input("是否要儲存 API Key 到 .env 檔案以便下次使用？(y/n): ").strip().lower()
+            print("是否要儲存 API Key 到 .env 檔案以便下次自動讀入？\n這會將 API Key 儲存在本機、本路徑下，請勿分享給他人。\n也建議您使用 .env 檔案來儲存 API Key，而不是手動輸入。\n強烈建議定期清理api key以防洩漏產生使用費用")
+            save_choice = input("是否存至.env檔案？(y/n): ").strip().lower()
             if save_choice == 'y':
                 save_api_key(api_key)
             return api_key
@@ -114,9 +124,92 @@ def transcribe_local(audio_path, model_size="base", language='zh'):
     """使用本地 Whisper 模型轉錄"""
     try:
         print(f"載入本地 Whisper 模型: {model_size}")
-        model = whisper.load_model(model_size)
-        print(f"開始轉錄 (語言: {language})...")
-        result = model.transcribe(audio_path, language=language, verbose=True, word_timestamps=True)
+        
+        # 檢查是否有 GPU 可用 (Mac M1/M2/M3)
+        device = "cpu"
+        use_gpu = False
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                # Mac GPU 有稀疏張量限制，直接使用 CPU 避免錯誤
+                print("✅ 檢測到 Mac GPU (MPS)，但由於稀疏張量限制，使用 CPU 以確保穩定性")
+                print("💡 提示：Mac GPU 對某些 Whisper 操作有限制，CPU 模式更穩定")
+                device = "cpu"
+                use_gpu = False
+            elif torch.cuda.is_available():
+                device = "cuda"
+                use_gpu = True
+                print("✅ 檢測到 CUDA GPU，將使用 GPU 加速")
+            else:
+                print("⚠️  未檢測到 GPU，使用 CPU")
+        except ImportError:
+            print("⚠️  PyTorch 未安裝，使用 CPU")
+        
+        # 檢查是否為打包環境
+        import sys
+        is_packaged = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+        
+        if is_packaged:
+            print("📦 檢測到打包環境，使用特殊處理")
+            # 在打包環境中，需要手動設定 Whisper 資源路徑
+            try:
+                import os
+                # 設定 Whisper 資源目錄
+                model_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+                os.makedirs(model_dir, exist_ok=True)
+                # 設定環境變數
+                os.environ['WHISPER_CACHE_DIR'] = model_dir
+                print(f"設定 Whisper 快取目錄: {model_dir}")
+            except Exception as e:
+                print(f"⚠️  設定 Whisper 資源路徑時發生錯誤: {e}")
+        
+        # 嘗試載入模型並處理各種錯誤
+        try:
+            model = whisper.load_model(model_size, device=device)
+            print(f"開始轉錄 (語言: {language}, 設備: {device})...")
+        except Exception as model_error:
+            error_msg = str(model_error).lower()
+            
+            if "sparse" in error_msg or "mps" in error_msg:
+                print("❌ Mac GPU 遇到稀疏張量限制，降級到 CPU")
+                device = "cpu"
+                model = whisper.load_model(model_size, device=device)
+                use_gpu = False
+                print(f"開始轉錄 (語言: {language}, 設備: {device})...")
+            elif "mel_filters" in error_msg or "assets" in error_msg:
+                print("❌ Whisper 資源檔案缺失，嘗試重新下載...")
+                # 嘗試清理快取並重新下載
+                try:
+                    import shutil
+                    import os
+                    cache_dir = os.path.expanduser("~/.cache/whisper")
+                    if os.path.exists(cache_dir):
+                        shutil.rmtree(cache_dir)
+                        print("清理 Whisper 快取完成")
+                except Exception as cleanup_error:
+                    print(f"清理快取時發生錯誤: {cleanup_error}")
+                
+                # 重新載入模型
+                model = whisper.load_model(model_size, device=device)
+                print(f"開始轉錄 (語言: {language}, 設備: {device})...")
+            else:
+                raise model_error
+        
+        # 根據設備設定轉錄參數
+        transcribe_kwargs = {
+            'language': language, 
+            'verbose': True, 
+            'word_timestamps': True
+        }
+        
+        # 只在支援的 GPU 上啟用 FP16
+        if use_gpu and device == "cuda":
+            transcribe_kwargs['fp16'] = True  # 只有 CUDA 完全支援 FP16
+        elif use_gpu and device == "mps":
+            # Mac GPU 不使用 FP16 避免稀疏張量問題
+            print("⚠️  Mac GPU 不使用 FP16 以避免稀疏張量錯誤")
+            
+        result = model.transcribe(audio_path, **transcribe_kwargs)
         return result
     except Exception as e:
         print(f"本地轉錄時發生錯誤: {e}")
@@ -142,22 +235,32 @@ def transcribe_api(audio_file_path, client=None):
 def add_punctuation_with_gpt(text_chunk, client):
     """使用 GPT 為文字片段添加標點符號"""
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "你是一個專業的文字編輯助手。請為以下沒有標點符號的文字添加適當的標點符號，包括句號、逗號、問號、驚嘆號等。保持原文的語意和結構，只添加標點符號。"
-                },
-                {
-                    "role": "user", 
-                    "content": f"請為以下文字添加標點符號：\n\n{text_chunk}"
-                }
-            ],
-            max_tokens=2000,
-            temperature=0.3
-        )
-        return response.choices[0].message.content.strip()
+        max_retry = 3
+        for attempt in range(max_retry):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "你是一個專業的文字編輯助手。請為以下沒有標點符號的文字添加適當的標點符號，包括句號、逗號、問號、驚嘆號等。保持原文的語意和結構，只添加標點符號。"
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"請為以下文字添加標點符號：\n\n{text_chunk}"
+                    }
+                ],
+                max_tokens=3000,
+                temperature=0.3
+            )
+            result = response.choices[0].message.content.strip()
+            len_orig = len(text_chunk)
+            len_result = len(result)
+            if len_orig == 0:
+                break
+            diff = abs(len_result - len_orig) / len_orig
+            if diff <= 0.1 or attempt == max_retry - 1:
+                return result
+            # 否則重試
     except Exception as e:
         print(f"GPT 標點符號處理時發生錯誤: {e}")
         return text_chunk  # 如果失敗，返回原文
@@ -202,6 +305,62 @@ def process_text_with_punctuation(text, client, chunk_size=100):
     
     return final_text
 
+# === 清空預存模型 ===
+def clear_whisper_models():
+    """清空目前已存預存模型"""
+    try:
+        import shutil
+        import os
+        
+        # Whisper 模型快取目錄
+        cache_dir = os.path.expanduser("~/.cache/whisper")
+        
+        if not os.path.exists(cache_dir):
+            print("✅ 沒有找到 Whisper 模型快取目錄")
+            print("可能原因：")
+            print("1. 尚未下載過任何 Whisper 模型")
+            print("2. 模型儲存在其他位置")
+            return True
+        
+        # 檢查目錄內容
+        files = os.listdir(cache_dir)
+        if not files:
+            print("✅ Whisper 快取目錄為空，無需清理")
+            return True
+        
+        print(f"📁 找到 Whisper 快取目錄: {cache_dir}")
+        print(f"📊 目錄中包含 {len(files)} 個檔案/資料夾")
+        
+        # 顯示將要刪除的內容
+        print("\n將要刪除的內容:")
+        for file in files:
+            file_path = os.path.join(cache_dir, file)
+            if os.path.isdir(file_path):
+                print(f"  📁 {file}/")
+            else:
+                size = os.path.getsize(file_path)
+                size_mb = size / (1024 * 1024)
+                print(f"  📄 {file} ({size_mb:.1f} MB)")
+        
+        # 確認刪除
+        print(f"\n⚠️  這將刪除所有 Whisper 模型檔案，釋放磁碟空間")
+        print("下次使用時需要重新下載模型")
+        confirm = input("確定要清空所有預存模型嗎？(y/n): ").strip().lower()
+        
+        if confirm == 'y':
+            # 刪除整個快取目錄
+            shutil.rmtree(cache_dir)
+            print("✅ Whisper 模型快取已清空")
+            print("💡 下次使用時會自動重新下載所需的模型")
+            return True
+        else:
+            print("❌ 取消清空操作")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 清空模型時發生錯誤: {e}")
+        return False
+
 # === 智能模型選擇 ===
 def smart_model_selection(audio_path):
     """智能選擇最佳模型"""
@@ -215,12 +374,13 @@ def smart_model_selection(audio_path):
     except:
         duration_minutes = 0
     
-    # 建議的模型順序（從大到小）
-    model_order = ["large", "medium"] # "small", "base", "tiny"
+    
+    model_order = ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"]
+    
     recommended = check_system_resources()
     
     print(f"系統建議模型: {recommended}")
-    print("將從最大模型開始嘗試，如果失敗會自動降級...")
+    print("將從建議模型開始嘗試，如果失敗會自動降級...")
     
     for model_size in model_order:
         print(f"\n嘗試使用 {model_size} 模型...")
@@ -322,6 +482,31 @@ if __name__ == "__main__":
     print("🎵 智能語音轉文字工具")
     print("=" * 50)
     
+    # 功能選擇
+    # 1. 轉錄youtube影片
+    # 2. 清空目前已存預存模型
+    # 3. 退出程式
+    print("請選擇功能:")
+    print("1. 轉錄youtube影片")
+    print("2. 清空目前已存預存模型")
+    print("3. 退出程式")
+    choice = input("請選擇 (1-3): ").strip()
+    
+    if choice == "2":
+        # 清空預存模型
+        print("\n🗑️  清空預存模型功能")
+        print("=" * 50)
+        clear_whisper_models()
+        # print("\n按 Enter 鍵返回主選單...")
+        # input()
+        exit(0)
+    elif choice == "3":
+        print("程式結束")
+        exit(0)
+    elif choice != "1":
+        print("無效選擇，程式結束")
+        exit(1)
+    
     # 取得 YouTube 網址
     youtube_url = input("要轉錄的YouTube影片網址: ").strip()
     if not youtube_url:
@@ -400,7 +585,10 @@ if __name__ == "__main__":
     print("\n請選擇轉錄方式:")
     print("1. 智能模式 (優先本地，失敗時使用API)")
     print("2. 本地模式 (僅使用本地模型)")
-    print(f"3. API模式 (僅使用OpenAI API，預估處理價格：{round(0.2*duration_minutes, 2)}元)")
+    if video_info['duration'] > 0:
+        print(f"3. API模式 (僅使用OpenAI API，預估處理價格：{round(0.2*video_info['duration']/60, 2)}元)")
+    else:
+        print("3. API模式 (僅使用OpenAI API，預估處理價格：未知)")
     
     mode = input("請選擇 (1-3): ").strip()
     
@@ -452,7 +640,7 @@ if __name__ == "__main__":
     
     elif mode == "2":  # 本地模式
         print("\n💻 本地模式")
-        model_size = input("請選擇模型大小 (large/medium/small/base/tiny), 越大品質越好: ").strip() or "base"
+        model_size = input("請選擇模型大小 (large-v3/large-v2/large/medium/small/base/tiny), 越大品質越好: ").strip() or "base"
         transcript = transcribe_local(audio_file, model_size)
         if transcript:
             used_method = f"本地模型 ({model_size})"
