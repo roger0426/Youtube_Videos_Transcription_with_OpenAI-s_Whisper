@@ -132,10 +132,9 @@ def transcribe_local(audio_path, model_size="base", language='zh'):
             import torch
             if torch.backends.mps.is_available():
                 # Mac GPU 有稀疏張量限制，直接使用 CPU 避免錯誤
-                print("✅ 檢測到 Mac GPU (MPS)，但由於稀疏張量限制，使用 CPU 以確保穩定性")
-                print("💡 提示：Mac GPU 對某些 Whisper 操作有限制，CPU 模式更穩定")
-                device = "cpu"
-                use_gpu = False
+                print("✅ 檢測到 Mac GPU (MPS)，但由於稀疏張量限制，可能會使用 CPU 以確保穩定性")
+                device = "mps"
+                use_gpu = True
             elif torch.cuda.is_available():
                 device = "cuda"
                 use_gpu = True
@@ -216,7 +215,7 @@ def transcribe_local(audio_path, model_size="base", language='zh'):
         return None
 
 # === API Whisper 轉錄 ===
-def transcribe_api(audio_file_path, client=None):
+def transcribe_api(audio_file_path, client=None, language=None):
     """使用 OpenAI Whisper API 轉錄"""
     try:
         with open(audio_file_path, "rb") as audio_file:
@@ -224,6 +223,7 @@ def transcribe_api(audio_file_path, client=None):
                 client = openai.OpenAI()
             response = client.audio.transcriptions.create(
                 model="whisper-1",
+                language=language,
                 file=audio_file
             )
             return response.text
@@ -246,11 +246,11 @@ def add_punctuation_with_gpt(text_chunk, client):
                     },
                     {
                         "role": "user", 
-                        "content": f"請為以下文字添加標點符號：\n\n{text_chunk}"
+                        "content": f"請為以下文字添加標點符號：\n{text_chunk}"
                     }
                 ],
-                max_tokens=3000,
-                temperature=0.3
+                max_tokens=len(text_chunk)+500,
+                temperature=0.1
             )
             result = response.choices[0].message.content.strip()
             len_orig = len(text_chunk)
@@ -258,7 +258,10 @@ def add_punctuation_with_gpt(text_chunk, client):
             if len_orig == 0:
                 break
             diff = abs(len_result - len_orig) / len_orig
-            if diff <= 0.1 or attempt == max_retry - 1:
+            if diff <= 0.2 or attempt == max_retry - 1:
+                print(f"✅ 標點符號處理完成！")
+                print(f"處理前文字長度: {len_orig} 字元")
+                print(f"處理後文字長度: {len(result)} 字元")
                 return result
             # 否則重試
     except Exception as e:
@@ -266,40 +269,32 @@ def add_punctuation_with_gpt(text_chunk, client):
         return text_chunk  # 如果失敗，返回原文
 
 # === 批量標點符號處理 ===
-def process_text_with_punctuation(text, client, chunk_size=100):
+def process_text_with_punctuation(text, client, text_len=1000):
     """將文字分割成片段，批量處理標點符號"""
     print(f"\n📝 開始標點符號處理...")
     print(f"原始文字長度: {len(text)} 字元")
     
-    # 按空格分割文字
-    words = text.split(" ")
-    if len(text) > 100 and len(words) < 5: # 文字未被分段
-        chunk_size = 2000
+    # 簡單按字元數分割，避免複雜的詞語分割邏輯
+    chunks = []
+    for i in range(0, len(text), text_len):
+        chunk = text[i:i + text_len]
+        chunks.append(chunk)
     
-    print(f"分割成 {len(words)} 個句子")
-    
-    # 計算需要處理的片段數量
-    total_chunks = (len(words) + chunk_size - 1) // chunk_size
-    print(f"將分成 {total_chunks} 個片段處理，每片段 {chunk_size} 個句子")
+    print(f"分割成 {len(chunks)} 個片段")
     
     processed_chunks = []
-    
-    for i in range(0, len(words), chunk_size):
-        chunk_num = i // chunk_size + 1
-        chunk_words = words[i:i + chunk_size]
-        chunk_text = " ".join(chunk_words)
+    for i, chunk in enumerate(chunks, 1):
+        print(f"--- 處理片段 {i}/{len(chunks)} ({len(chunk)} 字元)...")
         
-        print(f"處理片段 {chunk_num}/{total_chunks} ({len(chunk_words)} 個句子)...")
-        
-        # 使用 GPT 添加標點符號
-        punctuated_chunk = add_punctuation_with_gpt(chunk_text, client)
+        punctuated_chunk = add_punctuation_with_gpt(chunk, client)
         processed_chunks.append(punctuated_chunk)
         
-        # 添加小延遲避免 API 限制
-        time.sleep(0.5)
+        # 避免 API 限制
+        if i < len(chunks):
+            time.sleep(0.5)
     
     # 合併所有處理過的片段
-    final_text = " ".join(processed_chunks)
+    final_text = "".join(processed_chunks)
     print(f"✅ 標點符號處理完成！")
     print(f"處理後文字長度: {len(final_text)} 字元")
     
@@ -362,7 +357,7 @@ def clear_whisper_models():
         return False
 
 # === 智能模型選擇 ===
-def smart_model_selection(audio_path):
+def smart_model_selection(audio_path, language = None):
     """智能選擇最佳模型"""
     print("\n🤖 智能模型選擇模式")
     
@@ -385,7 +380,7 @@ def smart_model_selection(audio_path):
     for model_size in model_order:
         print(f"\n嘗試使用 {model_size} 模型...")
         try:
-            result = transcribe_local(audio_path, model_size)
+            result = transcribe_local(audio_path, model_size, language)
             if result:
                 print(f"✅ {model_size} 模型轉錄成功！")
                 return result, model_size
@@ -429,6 +424,39 @@ def get_video_info(youtube_url):
         print(f"取得影片資訊時發生錯誤: {e}")
         return None
 
+# === 處理本地音訊文件 ===
+def process_local_audio(file_path):
+    """處理本地音訊文件，轉換為適合轉錄的格式"""
+    try:
+        # 檢查文件是否存在
+        if not os.path.isfile(file_path):
+            print(f"❌ 文件不存在: {file_path}")
+            return None, None
+        
+        # 獲取文件信息
+        file_name = os.path.splitext(os.path.basename(file_path))[0]
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # 檢查是否為音訊文件
+        audio_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.wma']
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
+        
+        if file_ext in audio_extensions:
+            print(f"✅ 檢測到音訊文件: {file_path}")
+            return file_path, file_name
+        elif file_ext in video_extensions:
+            print(f"📹 檢測到影片文件: {file_path}")
+            print("將直接使用此文件進行轉錄...")
+            return file_path, file_name
+        else:
+            print(f"⚠️  未知文件格式: {file_ext}")
+            print("嘗試直接使用此文件...")
+            return file_path, file_name
+            
+    except Exception as e:
+        print(f"處理本地文件時發生錯誤: {e}")
+        return None, None
+
 # === 下載 YouTube 音訊 ===
 def download_audio(youtube_url, audio_path="downloads"):
     """下載 YouTube 音訊檔案"""
@@ -447,16 +475,29 @@ def download_audio(youtube_url, audio_path="downloads"):
             title = info.get('title', 'unknown')
             clean_title = clean_filename(title)
         
-        # 使用清理後的標題作為檔案名稱
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(audio_path, f'{clean_title}.%(ext)s'),
-            'extractaudio': True,
-            'audioformat': 'mp3',
-            'noplaylist': True,
-            'ignoreerrors': True,
-            'no_warnings': True,
-        }
+        # 檢查是否為 HLS 串流
+        is_hls = '.m3u8' in youtube_url.lower()
+        
+        if is_hls:
+            # HLS 串流使用不同的設定
+            ydl_opts = {
+                'format': 'best',
+                'outtmpl': os.path.join(audio_path, f'{clean_title}.%(ext)s'),
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'no_warnings': True,
+            }
+        else:
+            # 一般影片使用音訊提取
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(audio_path, f'{clean_title}.%(ext)s'),
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'no_warnings': True,
+            }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"正在下載音訊: {youtube_url}")
@@ -464,12 +505,43 @@ def download_audio(youtube_url, audio_path="downloads"):
             print(f"清理後標題: {clean_title}")
             ydl.download([youtube_url])
             
-            # 尋找下載的檔案
+            # 尋找下載的檔案 - 支援多種可能的檔案名稱
+            downloaded_files = []
+            import time
+            current_time = time.time()
+            
             for file in os.listdir(audio_path):
-                if file.startswith(clean_title) and file.endswith(('.mp3', '.m4a', '.webm', '.ogg')):
+                file_path = os.path.join(audio_path, file)
+                # 檢查是否為音訊/影片檔案
+                if file.endswith(('.mp3', '.m4a', '.webm', '.ogg', '.mp4', '.avi', '.mov', '.mkv', '.ts')):
+                    # 檢查檔案修改時間（最近下載的）
+                    file_time = os.path.getmtime(file_path)
+                    # 如果檔案是在最近5分鐘內創建的，認為是剛下載的
+                    if current_time - file_time < 300:  # 5分鐘
+                        downloaded_files.append((file_path, file_time, file))
+            
+            if downloaded_files:
+                # 選擇最新的檔案
+                latest_file = max(downloaded_files, key=lambda x: x[1])
+                file_path, _, file_name = latest_file
+                print(f"音訊下載完成: {file_name}")
+                return file_path, clean_title
+            
+            # 如果找不到最近下載的檔案，嘗試尋找任何音訊/影片檔案
+            print("未找到最近下載的檔案，搜尋所有音訊/影片檔案...")
+            all_media_files = []
+            for file in os.listdir(audio_path):
+                if file.endswith(('.mp3', '.m4a', '.webm', '.ogg', '.mp4', '.avi', '.mov', '.mkv', '.ts')):
                     file_path = os.path.join(audio_path, file)
-                    print(f"音訊下載完成: {file}")
-                    return file_path, clean_title
+                    file_time = os.path.getmtime(file_path)
+                    all_media_files.append((file_path, file_time, file))
+            
+            if all_media_files:
+                # 選擇最新的檔案
+                latest_file = max(all_media_files, key=lambda x: x[1])
+                file_path, _, file_name = latest_file
+                print(f"找到媒體檔案: {file_name}")
+                return file_path, clean_title
             
             raise Exception("找不到下載的音訊檔案")
         
@@ -477,61 +549,239 @@ def download_audio(youtube_url, audio_path="downloads"):
         print(f"下載音訊時發生錯誤: {e}")
         return None, None
 
+# === 處理不同類型的影片來源 ===
+def process_video_source(source):
+    """處理不同類型的影片來源"""
+    source = source.strip()
+    
+    # 檢查是否為 blob URL
+    if source.startswith('blob:'):
+        print("\n⚠️  檢測到 Blob URL")
+        print("Blob URL 無法直接下載，因為它是瀏覽器內部的臨時引用。")
+        print("\n請嘗試以下方法：")
+        print("1. 在瀏覽器中按 F12 打開開發者工具")
+        print("2. 切換到 Network 標籤")
+        print("3. 重新載入頁面或播放影片")
+        print("4. 尋找實際的影片文件 URL（.mp4, .m3u8, .ts 等）")
+        print("5. 複製該 URL 並重新輸入")
+        return None, None, "blob_url"
+    
+    # 檢查是否為本地文件
+    elif os.path.isfile(source):
+        print(f"\n📁 檢測到本地文件: {source}")
+        return source, os.path.splitext(os.path.basename(source))[0], "local_file"
+    
+    # 檢查是否為 YouTube URL
+    elif 'youtube.com' in source or 'youtu.be' in source:
+        return source, None, "youtube"
+    
+    # 檢查是否為其他線上影片 URL
+    elif source.startswith(('http://', 'https://')):
+        print(f"\n🌐 檢測到線上影片 URL: {source}")
+        print("嘗試使用 yt-dlp 下載...")
+        return source, None, "online_video"
+    
+    else:
+        print(f"\n❌ 無法識別的來源格式: {source}")
+        return None, None, "unknown"
+
+# === 為特定路徑的逐字稿加上標點符號 ===
+def add_punctuation_to_file(file_path):
+    """為指定路徑的逐字稿文件加上標點符號"""
+    try:
+        # 檢查文件是否存在
+        if not os.path.isfile(file_path):
+            print(f"❌ 文件不存在: {file_path}")
+            return False
+        
+        # 讀取文件內容
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        
+        if not content:
+            print("❌ 文件為空")
+            return False
+        
+        print(f"📄 讀取文件: {file_path}")
+        print(f"📊 文件大小: {len(content)} 字元")
+        
+        # 檢查是否已經有標點符號
+        has_punctuation = any(p in content for p in '。，！？；：')
+        if has_punctuation:
+            print("⚠️  文件似乎已經包含標點符號")
+            overwrite = input("是否要重新處理？(y/n): ").strip().lower()
+            if overwrite != 'y':
+                print("❌ 取消處理")
+                return False
+        
+        # 計算預估費用
+        text_length = len(content)
+        estimated_tokens = text_length * 1.3  # 粗略估算：中文字符約1.3個token
+        estimated_cost = (estimated_tokens / 1000) * 0.00015  # GPT-4o-mini 價格：$0.00015/1K tokens
+        
+        print(f"\n💰 費用預估:")
+        print(f"   文字長度: {text_length} 字元")
+        print(f"   預估 tokens: {estimated_tokens:.0f}")
+        print(f"   預估費用: 約 ${estimated_cost:.4f} 美元 (約 {estimated_cost * 30:.2f} 台幣)")
+        
+        # 確認是否繼續處理
+        print(f"\n是否要繼續進行標點符號處理？")
+        print("1. 是，繼續處理")
+        print("2. 否，取消處理")
+        
+        confirm = input("請選擇 (1-2): ").strip()
+        if confirm != "1":
+            print("❌ 取消處理")
+            return False
+        
+        # 取得 API Key
+        api_key = get_api_key()
+        if not api_key:
+            print("❌ 無法取得 API Key，無法進行標點符號處理")
+            return False
+        
+        # 備份原文件
+        backup_path = file_path + ".backup"
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"💾 已備份原文件至: {backup_path}")
+        
+        # 處理標點符號
+        client = openai.OpenAI(api_key=api_key)
+        punctuated_text = process_text_with_punctuation(content, client)
+        
+        # 儲存處理後的文件
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(punctuated_text)
+        
+        print(f"✅ 標點符號處理完成！")
+        print(f"📄 已更新文件: {file_path}")
+        print(f"📊 處理後長度: {len(punctuated_text)} 字元")
+        print(f"💾 原文件備份: {backup_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 處理文件時發生錯誤: {e}")
+        return False
+
+def save_file(used_method, output_filename, text):
+    with open(output_filename, "w", encoding="utf-8") as f:
+        f.write(text)
+    
+    print(f"\n✅ 標點符號處理完成！")
+    print(f"使用方法: {used_method} + GPT標點符號處理")
+    print(f"輸出檔案: {output_filename}")
+    print(f"處理後文字長度: {len(text)} 字元")
+
 # === 主程式 ===
 if __name__ == "__main__":
     print("🎵 智能語音轉文字工具")
     print("=" * 50)
     
     # 功能選擇
-    # 1. 轉錄youtube影片
-    # 2. 清空目前已存預存模型
-    # 3. 退出程式
     print("請選擇功能:")
-    print("1. 轉錄youtube影片")
-    print("2. 清空目前已存預存模型")
-    print("3. 退出程式")
-    choice = input("請選擇 (1-3): ").strip()
+    print("1. 轉錄影片 (支援 YouTube、本地文件、線上影片)")
+    print("2. 為特定的逐字稿加上標點符號")
+    print("3. 清空目前已存的 AI 模型")
+    print("4. 退出程式")
+    choice = input("請選擇 (1-4): ").strip()
     
     if choice == "2":
+        # 為特定路徑的逐字稿加上標點符號
+        print("\n📝 為逐字稿加上標點符號功能")
+        print("=" * 50)
+        
+        # 取得文件路徑
+        print("請輸入要處理的逐字稿文件路徑:")
+        print("支援格式: .txt 文件")
+        print("範例: /path/to/transcript.txt 或 output/逐字稿.txt")
+        
+        file_path = input("文件路徑: ").strip()
+        if not file_path:
+            print("❌ 未提供文件路徑")
+            exit(1)
+        
+        # 處理文件
+        success = add_punctuation_to_file(file_path)
+        if success:
+            print("\n✅ 處理完成！")
+        else:
+            print("\n❌ 處理失敗")
+        
+        exit(0)
+        
+    elif choice == "3":
         # 清空預存模型
-        print("\n🗑️  清空預存模型功能")
+        print("\n🗑️  清空預存 AI 模型功能")
         print("=" * 50)
         clear_whisper_models()
-        # print("\n按 Enter 鍵返回主選單...")
-        # input()
         exit(0)
-    elif choice == "3":
+    elif choice == "4":
         print("程式結束")
         exit(0)
     elif choice != "1":
         print("無效選擇，程式結束")
         exit(1)
     
-    # 取得 YouTube 網址
-    youtube_url = input("要轉錄的YouTube影片網址: ").strip()
-    if not youtube_url:
-        print("未提供網址，程式結束")
+    # 取得影片來源
+    print("\n請輸入影片來源:")
+    print("支援格式:")
+    print("- YouTube URL (如: https://www.youtube.com/watch?v=...)")
+    print("- 本地文件路徑 (如: /path/to/video.mp4)")
+    print("- 線上影片 URL (如: https://example.com/video.mp4)")
+    print("- 注意: Blob URL 無法直接處理，需要找到實際的影片 URL")
+    
+    video_source = input("影片來源: ").strip()
+    if not video_source:
+        print("未提供來源，程式結束")
         exit(1)
     
-    # 先取得影片資訊讓使用者確認
-    print("\n📋 正在取得影片資訊...")
-    video_info = get_video_info(youtube_url)
+    # 處理不同類型的影片來源
+    processed_source, video_title, source_type = process_video_source(video_source)
     
-    if not video_info:
-        print("❌ 無法取得影片資訊，請檢查網址是否正確")
+    if source_type == "blob_url":
+        print("\n請按照上述說明找到實際的影片 URL 後重新執行程式")
         exit(1)
+    elif source_type == "unknown":
+        print("無法處理此來源格式")
+        exit(1)
+    
+    # 根據來源類型處理影片資訊
+    video_info = None
+    audio_file = None
+    
+    if source_type == "local_file":
+        # 本地文件處理
+        print(f"\n📁 處理本地文件: {processed_source}")
+        audio_file, file_title = process_local_audio(processed_source)
+        if not audio_file:
+            print("❌ 無法處理本地文件")
+            exit(1)
+        video_title = file_title or "local_video"
+        video_info = {'title': video_title, 'duration': 0, 'uploader': 'local', 'url': processed_source}
+        
+    elif source_type in ["youtube", "online_video"]:
+        # 線上影片處理
+        print("\n📋 正在取得影片資訊...")
+        video_info = get_video_info(processed_source)
+        
+        if not video_info:
+            print("❌ 無法取得影片資訊，請檢查網址是否正確")
+            exit(1)
     
     # 顯示影片資訊
-    print("\n" + "="*60)
-    print("📺 影片資訊確認")
-    print("="*60)
-    print(f"標題: {video_info['title']}")
-    print(f"上傳者: {video_info['uploader']}")
-    if video_info['duration'] > 0:
-        duration_minutes = video_info['duration'] / 60
-        print(f"長度: {duration_minutes:.1f} 分鐘")
-    print(f"網址: {video_info['url']}")
-    print("="*60)
+    if video_info:
+        print("\n" + "="*60)
+        print("📺 影片資訊確認")
+        print("="*60)
+        print(f"標題: {video_info['title']}")
+        print(f"上傳者: {video_info['uploader']}")
+        if video_info['duration'] > 0:
+            duration_minutes = video_info['duration'] / 60
+            print(f"長度: {duration_minutes:.1f} 分鐘")
+        print(f"來源: {video_info['url']}")
+        print("="*60)
     
     # 讓使用者確認
     print("\n請確認是否要轉錄此影片？")
@@ -542,19 +792,37 @@ if __name__ == "__main__":
     confirm = input("請選擇 (1-3): ").strip()
     
     if confirm == "2":
-        # 重新輸入網址
-        youtube_url = input("\n請重新輸入YouTube影片網址: ").strip()
-        if not youtube_url:
-            print("未提供網址，程式結束")
+        # 重新輸入來源
+        video_source = input("\n請重新輸入影片來源: ").strip()
+        if not video_source:
+            print("未提供來源，程式結束")
+            exit(1)
+        
+        # 重新處理影片來源
+        processed_source, video_title, source_type = process_video_source(video_source)
+        
+        if source_type == "blob_url":
+            print("\n請按照上述說明找到實際的影片 URL 後重新執行程式")
+            exit(1)
+        elif source_type == "unknown":
+            print("無法處理此來源格式")
             exit(1)
         
         # 重新取得影片資訊
-        print("\n📋 正在取得影片資訊...")
-        video_info = get_video_info(youtube_url)
-        
-        if not video_info:
-            print("❌ 無法取得影片資訊，請檢查網址是否正確")
-            exit(1)
+        if source_type == "local_file":
+            audio_file, file_title = process_local_audio(processed_source)
+            if not audio_file:
+                print("❌ 無法處理本地文件")
+                exit(1)
+            video_title = file_title or "local_video"
+            video_info = {'title': video_title, 'duration': 0, 'uploader': 'local', 'url': processed_source}
+        else:
+            print("\n📋 正在取得影片資訊...")
+            video_info = get_video_info(processed_source)
+            
+            if not video_info:
+                print("❌ 無法取得影片資訊，請檢查網址是否正確")
+                exit(1)
         
         # 再次顯示影片資訊
         print("\n" + "="*60)
@@ -565,7 +833,7 @@ if __name__ == "__main__":
         if video_info['duration'] > 0:
             duration_minutes = video_info['duration'] / 60
             print(f"長度: {duration_minutes:.1f} 分鐘")
-        print(f"網址: {video_info['url']}")
+        print(f"來源: {video_info['url']}")
         print("="*60)
         
         # 再次確認
@@ -581,9 +849,23 @@ if __name__ == "__main__":
         print("無效選擇，程式結束")
         exit(1)
     
+    # 選擇轉錄語言
+    print("\n請選擇轉錄語言:")
+    print("1. 中文")
+    print("2. 英文")
+    print("3. 多語言混雜")
+    language = input("請選擇 (1-3): ").strip()
+    
+    if language == '1':
+        language = 'zh'
+    elif language == '2':
+        language = 'en'
+    else:
+        language = None
+    
     # 選擇轉錄方式
     print("\n請選擇轉錄方式:")
-    print("1. 智能模式 (優先本地，失敗時使用API)")
+    print("1. 智能模式 (由大至小測試本地可用的模型)")
     print("2. 本地模式 (僅使用本地模型)")
     if video_info['duration'] > 0:
         print(f"3. API模式 (僅使用OpenAI API，預估處理價格：{round(0.2*video_info['duration']/60, 2)}元)")
@@ -592,27 +874,31 @@ if __name__ == "__main__":
     
     mode = input("請選擇 (1-3): ").strip()
     
-    # 下載音訊
-    print("\n開始下載音訊...")
-    max_retries = 3
-    audio_file = None
-    video_title = None
-    
-    for attempt in range(max_retries):
-        print(f"嘗試第 {attempt + 1} 次下載...")
-        result = download_audio(youtube_url)
-        if result and result[0]:
-            audio_file, video_title = result
-            break
-        if attempt < max_retries - 1:
-            print("等待 3 秒後重試...")
-            time.sleep(3)
-    
-    if not audio_file or not video_title:
-        print("❌ 下載失敗，請檢查網址是否正確")
-        exit(1)
-    
-    print(f"✅ 音訊下載成功: {video_title}")
+    # 處理音訊文件
+    if source_type != "local_file":
+        # 下載音訊
+        print("\n開始下載音訊...")
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            print(f"嘗試第 {attempt + 1} 次下載...")
+            result = download_audio(processed_source)
+            if result and result[0]:
+                audio_file, video_title = result
+                break
+            if attempt < max_retries - 1:
+                print("等待 3 秒後重試...")
+                time.sleep(3)
+        
+        if not audio_file or not video_title:
+            print("❌ 下載失敗，請檢查網址是否正確")
+            exit(1)
+        
+        print(f"✅ 音訊下載成功: {video_title}")
+    else:
+        # 本地文件，直接使用
+        video_title = video_info['title']
+        print(f"✅ 使用本地文件: {video_title}")
     
     # 根據選擇的模式進行轉錄
     transcript = None
@@ -621,7 +907,7 @@ if __name__ == "__main__":
     if mode == "1":  # 智能模式
         print("\n🤖 智能模式啟動")
         # 先嘗試本地
-        transcript, model_used = smart_model_selection(audio_file)
+        transcript, model_used = smart_model_selection(audio_file, language)
         if transcript:
             used_method = f"本地模型 ({model_used})"
         else:
@@ -629,7 +915,7 @@ if __name__ == "__main__":
             api_key = get_api_key()
             if api_key:
                 client = openai.OpenAI(api_key=api_key)
-                transcript_text = transcribe_api(audio_file, client)
+                transcript_text = transcribe_api(audio_file, client, language)
                 if transcript_text:
                     transcript = {"text": transcript_text}
                     used_method = "OpenAI API"
@@ -640,8 +926,8 @@ if __name__ == "__main__":
     
     elif mode == "2":  # 本地模式
         print("\n💻 本地模式")
-        model_size = input("請選擇模型大小 (large-v3/large-v2/large/medium/small/base/tiny), 越大品質越好: ").strip() or "base"
-        transcript = transcribe_local(audio_file, model_size)
+        model_size = input("請選擇模型大小 (large-v3/large-v2/large/medium/small/base/tiny), 越大品質越好 但也需要更多的運行資源及時間, 預設\"base\": ").strip() or "base"
+        transcript = transcribe_local(audio_file, model_size, language)
         if transcript:
             used_method = f"本地模型 ({model_size})"
     
@@ -651,7 +937,7 @@ if __name__ == "__main__":
         if api_key:
             print("正在使用 API 轉錄...")
             client = openai.OpenAI(api_key=api_key)
-            transcript_text = transcribe_api(audio_file, client)
+            transcript_text = transcribe_api(audio_file, client, language)
             if transcript_text:
                 transcript = {"text": transcript_text}
                 used_method = "OpenAI API"
@@ -665,45 +951,40 @@ if __name__ == "__main__":
             os.makedirs(output_path)
         output_filename = os.path.join(output_path, f"{video_title}.txt")
         traditional_text = zhconv.convert(transcript["text"], 'zh-hant')
-        # 詢問是否要添加標點符號
-        print(f"\n📝 轉錄完成！原始文字長度: {len(traditional_text)} 字元")
-        print("\n是否要使用 GPT 為文字添加標點符號？")
-        print("1. 是，添加標點符號 (需要 OpenAI API Key)")
-        print("2. 否，直接儲存原始文字")
-        
-        punctuation_choice = input("請選擇 (1-2): ").strip()
-        
-        if punctuation_choice == "1":
-            # 需要 API Key 進行標點符號處理
-            api_key = get_api_key()
-            if api_key:
-                client = openai.OpenAI(api_key=api_key)
-                punctuated_text = process_text_with_punctuation(traditional_text, client)
-                
-                # 儲存帶標點符號的版本
-                with open(output_filename, "w", encoding="utf-8") as f:
-                    f.write(punctuated_text)
-                
-                print(f"\n✅ 標點符號處理完成！")
-                print(f"使用方法: {used_method} + GPT標點符號處理")
-                print(f"輸出檔案: {output_filename}")
-                print(f"處理後文字長度: {len(punctuated_text)} 字元")
-            else:
-                print("❌ 無法取得 API Key，儲存原始文字")
-                with open(output_filename, "w", encoding="utf-8") as f:
-                    f.write(traditional_text)
-                print(f"✅ 轉錄完成！")
-                print(f"使用方法: {used_method}")
-                print(f"輸出檔案: {output_filename}")
-                print(f"逐字稿長度: {len(traditional_text)} 字元")
-        else:
-            # 直接儲存原始文字
-            with open(output_filename, "w", encoding="utf-8") as f:
-                f.write(traditional_text)
+        punctuation_choice = ''
+        if mode != "3": # not using OpenIA API
+            # 詢問是否要添加標點符號
+            print(f"\n📝 轉錄完成！原始文字長度: {len(traditional_text)} 字元")
+            print("\n是否要使用 GPT 為文字添加標點符號？")
+            # 計算標點符號處理的預估成本
+            text_length = len(traditional_text)
+            estimated_tokens = text_length * 1.3  # 粗略估算：中文字符約1.3個token
+            estimated_cost = (estimated_tokens / 1000) * 0.00015  # GPT-4o-mini 價格：$0.00015/1K tokens
             
-            print(f"\n✅ 轉錄完成！")
-            print(f"使用方法: {used_method}")
-            print(f"輸出檔案: {output_filename}")
-            print(f"逐字稿長度: {len(traditional_text)} 字元")
+            print("1. 是，添加標點符號 (需要 OpenAI API Key)")
+            print(f"   預估成本: 約 ${estimated_cost:.4f} 美元 (約 {estimated_cost * 30:.2f} 台幣)")
+            print(f"   文字長度: {text_length} 字元，預估 {estimated_tokens:.0f} tokens")
+            print("2. 否，直接儲存原始文字")
+        
+            punctuation_choice = input("請選擇 (1-2): ").strip()
+        
+            if punctuation_choice == "1":
+                # 需要 API Key 進行標點符號處理
+                api_key = get_api_key()
+                if api_key:
+                    
+                    with open(os.path.join(output_path, f"{video_title}_unpunctuated.txt"), "w", encoding="utf-8") as f:
+                        f.write(traditional_text)
+                    
+                    client = openai.OpenAI(api_key=api_key)
+                    punctuated_text = process_text_with_punctuation(traditional_text, client)
+                    
+                    # 儲存帶標點符號的版本
+                    save_file(used_method, output_filename, punctuated_text)
+                else:
+                    print("❌ 無法取得 API Key，儲存原始文字")
+                    save_file(used_method, os.path.join(output_path, f"{video_title}_unpunctuated.txt"), traditional_text)
+        else:
+            save_file(used_method, output_filename, traditional_text)
     else:
         print("\n❌ 轉錄失敗")
