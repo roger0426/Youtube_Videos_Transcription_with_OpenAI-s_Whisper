@@ -651,7 +651,7 @@ def add_punctuation_to_file(file_path):
         punctuated_text = process_text_with_punctuation(content, client)
         
         # 儲存處理後的文件
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path.replace('_punctuated.txt', '.txt'), 'w', encoding='utf-8') as f:
             f.write(punctuated_text)
         
         print(f"✅ 標點符號處理完成！")
@@ -665,12 +665,91 @@ def add_punctuation_to_file(file_path):
         print(f"❌ 處理文件時發生錯誤: {e}")
         return False
 
+# === 處理影片來源輸入與確認 ===
+def handle_video_source_input():
+    """提示使用者輸入影片來源，進行處理、顯示資訊並要求確認。循環直到獲得有效輸入或使用者退出。"""
+    while True:
+        # 取得影片來源
+        print("\n請輸入影片來源:")
+        print("支援格式:")
+        print("- YouTube URL (如: https://www.youtube.com/watch?v=...)")
+        print("- 本地文件路徑 (如: /path/to/video.mp4)")
+        print("- 線上影片 URL (如: https://example.com/video.mp4)")
+        print("- 注意: Blob URL 無法直接處理，需要找到實際的影片 URL")
+        
+        video_source = input("影片來源: ").strip()
+        if not video_source:
+            print("未提供來源，程式結束")
+            return None, None, None, None
+
+        # 處理不同類型的影片來源
+        processed_source, video_title, source_type = process_video_source(video_source)
+
+        if source_type == "blob_url":
+            print("\n請按照上述說明找到實際的影片 URL 後重新執行程式")
+            return None, None, None, None
+        elif source_type == "unknown":
+            print("無法處理此來源格式，請重新輸入")
+            continue
+
+        # 根據來源類型處理影片資訊
+        video_info = None
+        audio_file = None
+
+        if source_type == "local_file":
+            print(f"\n📁 處理本地文件: {processed_source}")
+            audio_file, file_title = process_local_audio(processed_source)
+            if not audio_file:
+                print("❌ 無法處理本地文件，請重新輸入")
+                continue
+            video_title = file_title or "local_video"
+            video_info = {'title': video_title, 'duration': 0, 'uploader': 'local', 'url': processed_source}
+        
+        elif source_type in ["youtube", "online_video"]:
+            print("\n📋 正在取得影片資訊...")
+            video_info = get_video_info(processed_source)
+            if not video_info:
+                print("❌ 無法取得影片資訊，請檢查網址是否正確或重新輸入")
+                continue
+
+        # 顯示影片資訊
+        if video_info:
+            print("\n" + "="*60)
+            print("📺 影片資訊確認")
+            print("="*60)
+            print(f"標題: {video_info['title']}")
+            print(f"上傳者: {video_info['uploader']}")
+            if video_info['duration'] > 0:
+                duration_minutes = video_info['duration'] / 60
+                print(f"長度: {duration_minutes:.1f} 分鐘")
+            print(f"來源: {video_info['url']}")
+            print("="*60)
+
+        # 讓使用者確認
+        print("\n請確認是否要轉錄此影片？")
+        print("1. 是，繼續轉錄")
+        print("2. 否，重新輸入來源")
+        print("3. 退出程式")
+        
+        confirm = input("請選擇 (1-3): ").strip()
+
+        if confirm == "1":
+            return video_info, processed_source, audio_file, source_type
+        elif confirm == "3":
+            print("程式結束")
+            return None, None, None, None
+        elif confirm == "2":
+            continue  # 循環回到開頭，要求重新輸入
+        else:
+            print("無效選擇，程式結束")
+            return None, None, None, None
+
 def save_file(used_method, output_filename, text):
     with open(output_filename, "w", encoding="utf-8") as f:
         f.write(text)
     
-    print(f"\n✅ 標點符號處理完成！")
-    print(f"使用方法: {used_method} + GPT標點符號處理")
+    print(f"\n✅ 轉錄與儲存完成！")
+    print(f"使用方法: {used_method}")
     print(f"輸出檔案: {output_filename}")
     print(f"處理後文字長度: {len(text)} 字元")
 
@@ -724,130 +803,13 @@ if __name__ == "__main__":
         print("無效選擇，程式結束")
         exit(1)
     
-    # 取得影片來源
-    print("\n請輸入影片來源:")
-    print("支援格式:")
-    print("- YouTube URL (如: https://www.youtube.com/watch?v=...)")
-    print("- 本地文件路徑 (如: /path/to/video.mp4)")
-    print("- 線上影片 URL (如: https://example.com/video.mp4)")
-    print("- 注意: Blob URL 無法直接處理，需要找到實際的影片 URL")
-    
-    video_source = input("影片來源: ").strip()
-    if not video_source:
-        print("未提供來源，程式結束")
-        exit(1)
-    
-    # 處理不同類型的影片來源
-    processed_source, video_title, source_type = process_video_source(video_source)
-    
-    if source_type == "blob_url":
-        print("\n請按照上述說明找到實際的影片 URL 後重新執行程式")
-        exit(1)
-    elif source_type == "unknown":
-        print("無法處理此來源格式")
-        exit(1)
-    
-    # 根據來源類型處理影片資訊
-    video_info = None
-    audio_file = None
-    
-    if source_type == "local_file":
-        # 本地文件處理
-        print(f"\n📁 處理本地文件: {processed_source}")
-        audio_file, file_title = process_local_audio(processed_source)
-        if not audio_file:
-            print("❌ 無法處理本地文件")
-            exit(1)
-        video_title = file_title or "local_video"
-        video_info = {'title': video_title, 'duration': 0, 'uploader': 'local', 'url': processed_source}
-        
-    elif source_type in ["youtube", "online_video"]:
-        # 線上影片處理
-        print("\n📋 正在取得影片資訊...")
-        video_info = get_video_info(processed_source)
-        
-        if not video_info:
-            print("❌ 無法取得影片資訊，請檢查網址是否正確")
-            exit(1)
-    
-    # 顯示影片資訊
-    if video_info:
-        print("\n" + "="*60)
-        print("📺 影片資訊確認")
-        print("="*60)
-        print(f"標題: {video_info['title']}")
-        print(f"上傳者: {video_info['uploader']}")
-        if video_info['duration'] > 0:
-            duration_minutes = video_info['duration'] / 60
-            print(f"長度: {duration_minutes:.1f} 分鐘")
-        print(f"來源: {video_info['url']}")
-        print("="*60)
-    
-    # 讓使用者確認
-    print("\n請確認是否要轉錄此影片？")
-    print("1. 是，繼續轉錄")
-    print("2. 否，重新輸入網址")
-    print("3. 退出程式")
-    
-    confirm = input("請選擇 (1-3): ").strip()
-    
-    if confirm == "2":
-        # 重新輸入來源
-        video_source = input("\n請重新輸入影片來源: ").strip()
-        if not video_source:
-            print("未提供來源，程式結束")
-            exit(1)
-        
-        # 重新處理影片來源
-        processed_source, video_title, source_type = process_video_source(video_source)
-        
-        if source_type == "blob_url":
-            print("\n請按照上述說明找到實際的影片 URL 後重新執行程式")
-            exit(1)
-        elif source_type == "unknown":
-            print("無法處理此來源格式")
-            exit(1)
-        
-        # 重新取得影片資訊
-        if source_type == "local_file":
-            audio_file, file_title = process_local_audio(processed_source)
-            if not audio_file:
-                print("❌ 無法處理本地文件")
-                exit(1)
-            video_title = file_title or "local_video"
-            video_info = {'title': video_title, 'duration': 0, 'uploader': 'local', 'url': processed_source}
-        else:
-            print("\n📋 正在取得影片資訊...")
-            video_info = get_video_info(processed_source)
-            
-            if not video_info:
-                print("❌ 無法取得影片資訊，請檢查網址是否正確")
-                exit(1)
-        
-        # 再次顯示影片資訊
-        print("\n" + "="*60)
-        print("📺 影片資訊確認")
-        print("="*60)
-        print(f"標題: {video_info['title']}")
-        print(f"上傳者: {video_info['uploader']}")
-        if video_info['duration'] > 0:
-            duration_minutes = video_info['duration'] / 60
-            print(f"長度: {duration_minutes:.1f} 分鐘")
-        print(f"來源: {video_info['url']}")
-        print("="*60)
-        
-        # 再次確認
-        confirm = input("\n確認轉錄此影片？(y/n): ").strip().lower()
-        if confirm != 'y':
-            print("程式結束")
-            exit(1)
-            
-    elif confirm == "3":
-        print("程式結束")
-        exit(1)
-    elif confirm != "1":
-        print("無效選擇，程式結束")
-        exit(1)
+    # 取得並確認影片來源
+    video_info, processed_source, audio_file, source_type = handle_video_source_input()
+
+    if not video_info:
+        exit(1)  # 使用者決定退出或在處理過程中發生錯誤
+
+    video_title = video_info['title']
     
     # 選擇轉錄語言
     print("\n請選擇轉錄語言:")
@@ -949,42 +911,58 @@ if __name__ == "__main__":
         output_path = "output"
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        output_filename = os.path.join(output_path, f"{video_title}.txt")
-        traditional_text = zhconv.convert(transcript["text"], 'zh-hant')
-        punctuation_choice = ''
-        if mode != "3": # not using OpenIA API
+        
+        # 使用 clean_filename 確保檔案名稱安全
+        output_filename = os.path.join(output_path, f"{clean_filename(video_title)}.txt")
+        
+        # 處理繁簡轉換
+        transcript_text = transcript["text"]
+        if language == 'zh':
+            transcript_text = zhconv.convert(transcript_text, 'zh-hant')
+
+        # API 模式通常已包含標點，直接儲存
+        if mode == "3":
+            print("\n✅ API 轉錄結果已包含標點。")
+            save_file(used_method, output_filename, transcript_text)
+        else:
+            # 本地模式，詢問是否要用 GPT 加標點
+            print(f"\n📝 轉錄完成！原始文字長度: {len(transcript_text)} 字元")
+            
             # 詢問是否要添加標點符號
-            print(f"\n📝 轉錄完成！原始文字長度: {len(traditional_text)} 字元")
             print("\n是否要使用 GPT 為文字添加標點符號？")
-            # 計算標點符號處理的預估成本
-            text_length = len(traditional_text)
-            estimated_tokens = text_length * 1.3  # 粗略估算：中文字符約1.3個token
-            estimated_cost = (estimated_tokens / 1000) * 0.00015  # GPT-4o-mini 價格：$0.00015/1K tokens
+            # 計算標點符號處理的預估成本 (gpt-4o-mini: $0.15/1M input tokens)
+            text_length = len(transcript_text)
+            estimated_tokens = text_length * 1.3
+            estimated_cost = (estimated_tokens / 1_000_000) * 0.15 
             
             print("1. 是，添加標點符號 (需要 OpenAI API Key)")
-            print(f"   預估成本: 約 ${estimated_cost:.4f} 美元 (約 {estimated_cost * 30:.2f} 台幣)")
+            print(f"   預估成本: 約 ${estimated_cost:.5f} 美元 (約 {estimated_cost * 32:.3f} 台幣)")
             print(f"   文字長度: {text_length} 字元，預估 {estimated_tokens:.0f} tokens")
-            print("2. 否，直接儲存原始文字")
+            print("2. 否，儲存不含標點的原始版本")
         
             punctuation_choice = input("請選擇 (1-2): ").strip()
-        
+
             if punctuation_choice == "1":
-                # 需要 API Key 進行標點符號處理
                 api_key = get_api_key()
                 if api_key:
-                    
-                    with open(os.path.join(output_path, f"{video_title}_unpunctuated.txt"), "w", encoding="utf-8") as f:
-                        f.write(traditional_text)
-                    
                     client = openai.OpenAI(api_key=api_key)
-                    punctuated_text = process_text_with_punctuation(traditional_text, client)
+                    
+                    # 儲存原始版本作為備份
+                    unpunctuated_filename = os.path.join(output_path, f"{clean_filename(video_title)}_unpunctuated.txt")
+                    with open(unpunctuated_filename, "w", encoding="utf-8") as f:
+                        f.write(transcript_text)
+                    print(f"\n💾 已儲存原始無標點版本至: {unpunctuated_filename}")
+
+                    # 處理標點
+                    punctuated_text = process_text_with_punctuation(transcript_text, client)
                     
                     # 儲存帶標點符號的版本
-                    save_file(used_method, output_filename, punctuated_text)
+                    save_file(f"{used_method} + GPT 標點", output_filename, punctuated_text)
                 else:
-                    print("❌ 無法取得 API Key，儲存原始文字")
-                    save_file(used_method, os.path.join(output_path, f"{video_title}_unpunctuated.txt"), traditional_text)
-        else:
-            save_file(used_method, output_filename, traditional_text)
+                    print("❌ 無法取得 API Key，僅儲存原始文字")
+                    save_file(used_method, output_filename, transcript_text)
+            else:
+                print("僅儲存原始文字版本。")
+                save_file(used_method, output_filename, transcript_text)
     else:
         print("\n❌ 轉錄失敗")
